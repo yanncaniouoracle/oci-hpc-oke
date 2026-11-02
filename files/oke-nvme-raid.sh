@@ -49,6 +49,15 @@ if [[ $count -eq 1 ]]; then
   level=0
 fi
 
+# OCI soft reboots press the ACPI power key, which udisksd inhibits during md syncs/checks.
+# md saves sync progress on a clean stop, so allow the power key to trigger shutdown.
+if [[ $level != 0 ]]; then
+  mkdir -p /etc/systemd/logind.conf.d
+  printf '[Login]\nPowerKeyIgnoreInhibited=yes\n' > /etc/systemd/logind.conf.d/90-oke-power-key.conf
+  # SIGHUP also works on older systemd versions without logind reload support.
+  systemctl kill -s HUP systemd-logind || echo "Could not reload systemd-logind" >&2
+fi
+
 eff_count=$count # $level == 0
 if [[ $level == 10 ]]; then eff_count=$((count/2)); fi
 if [[ $level == 5 ]]; then eff_count=$((count-1)); fi
@@ -59,7 +68,11 @@ echo -e "Creating RAID${level} filesystem mounted under ${mount_primary} with $c
 echo -e "Filesystem options:\n  eff_count=$eff_count; chunk=${chunk}K; bs=${bs}K; stride=$stride; stripe-width=${stripe}" >&2
 shopt -u nullglob; seen_arrays=(/dev/md/*); device=${seen_arrays[0]}
 if [ ! -e "$md_device" ]; then
-  echo "y" | mdadm --create "$md_device" --level="$level" --chunk=$chunk --force --raid-devices="$count" "${devices[@]}"
+  # New RAID 10 filesystems only read blocks they have written; skip the long initial mirror sync.
+  # RAID 5/6 still need their initial sync to establish correct parity.
+  assume_clean=""
+  if [[ $level == 10 ]]; then assume_clean="--assume-clean"; fi
+  echo "y" | mdadm --create "$md_device" --level="$level" $assume_clean --chunk=$chunk --force --raid-devices="$count" "${devices[@]}"
   dd if=/dev/zero of="$md_device" bs=${bs}K count=128
 else
   echo "$md_device already initialized" >&2
